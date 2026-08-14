@@ -104,11 +104,13 @@ you switch the addendum on, measure your own efficiency delta with
 
 from __future__ import annotations
 
+import json
 import re
 from dataclasses import dataclass, field
 
 from arena.model import (
     ARENA_SYSTEM_PROMPT,
+    ParsedOutput,
     TOOL_ERROR_PREFIX,
     parse_output,
 )
@@ -269,7 +271,27 @@ G. TÁCH NHU CẦU TRA CỨU KHỎI BỐI CẢNH GÂY NHIỄU.
    fetch hàng loạt; hãy search lại bằng chủ đề chính. Search chỉ dùng để khám phá:
    mọi claim cuối cùng phải đến từ toàn văn đã đọc bằng fetch_doc.
    Trước khi FINAL, kiểm tra từng yêu cầu trong câu hỏi đã có ít nhất một claim chứa
-   đúng dữ kiện tương ứng; nếu thiếu thì tiếp tục tìm trong ngân sách còn lại."""
+   đúng dữ kiện tương ứng; nếu thiếu thì tiếp tục tìm trong ngân sách còn lại.
+
+H. TRA CỨU NHIỀU CHẶNG VÀ ƯU TIÊN NGUỒN CÓ THẨM QUYỀN.
+   Ticket, email, biên bản, FAQ và ghi chú tình huống chỉ là đầu mối. Sau khi đọc một
+   đầu mối, phải rút ra chủ đề nghiệp vụ mà nó nhắc tới rồi search tiếp chính sách,
+   quy trình, văn bản chính thức hoặc báo cáo cùng chủ đề trước khi FINAL. Không dùng
+   một ticket đơn lẻ làm điểm dừng nếu câu hỏi có liên quan đến chính sách, quy trình,
+   cách xử lý, số liệu hoặc báo cáo.
+   Khi cần quy định, ưu tiên tài liệu có tiêu đề hoặc nội dung thể hiện là văn bản chính
+   thức/quy trình/chính sách. Khi cần con số đã ghi nhận, ưu tiên báo cáo; truy vấn bằng
+   tên đầy đủ của quy trình hay hoạt động đang được hỏi cộng với từ "báo cáo", thay vì
+   các cụm mơ hồ như "các vụ tương tự". Nếu kết quả search không đúng chủ đề, hãy đổi
+   truy vấn trước khi fetch thêm tài liệu.
+   Khi dữ liệu thực sự không có, claim phải chép nguyên văn chính dòng cảnh báo rằng
+   không được suy diễn hoặc dòng xác nhận dữ liệu chưa có/chưa đồng bộ; đặt abstain là
+   true và giữ nguyên chữ hoa, dấu câu của dòng nguồn.
+
+I. CẤU TRÚC ACTION.
+   ACTION phải nằm trên một dòng. Đối tượng của ACTION chỉ có khóa tool và khóa args;
+   mọi tham số như query, k, doc_id hoặc expression phải nằm BÊN TRONG đối tượng args,
+   tuyệt đối không đặt chúng ngang hàng với tool."""
 
 
 def real_model_system_prompt(base: str = ARENA_SYSTEM_PROMPT) -> str:
@@ -318,6 +340,43 @@ def _canonicalise(text: str) -> str:
         return _canonicalise_output(text)
     except Exception:  # pragma: no cover - defensive only
         return text
+
+
+_TOP_LEVEL_TOOL_ARGS = {
+    "search": ("query", "k"),
+    "fetch_doc": ("doc_id",),
+    "calc": ("expression",),
+}
+
+
+def _repair_top_level_action_args(text: str, parsed: ParsedOutput) -> ParsedOutput:
+    """Recover documented tool args that a real model left at top level."""
+    if parsed.kind != "action" or parsed.args or parsed.tool not in _TOP_LEVEL_TOOL_ARGS:
+        return parsed
+    marker = "ACTION:"
+    marker_at = text.find(marker)
+    if marker_at == -1:
+        return parsed
+    payload_text = text[marker_at + len(marker):].lstrip()
+    try:
+        payload, _end = json.JSONDecoder().raw_decode(payload_text)
+    except (TypeError, ValueError):
+        return parsed
+    if not isinstance(payload, dict) or payload.get("tool") != parsed.tool:
+        return parsed
+    args = {
+        key: payload[key]
+        for key in _TOP_LEVEL_TOOL_ARGS[parsed.tool]
+        if key in payload
+    }
+    if not args:
+        return parsed
+    return ParsedOutput(
+        kind="action",
+        thought=parsed.thought,
+        tool=parsed.tool,
+        args=args,
+    )
 
 
 def _is_placeholder(value) -> bool:
@@ -399,7 +458,9 @@ def _action_under_final(text: str):
     lines = text.split("\n")
     for index, line in enumerate(lines):
         if line.startswith(_FINAL_MARKER):
-            below = parse_output("\n".join(lines[index + 1:]))
+            action_text = "\n".join(lines[index + 1:])
+            below = parse_output(action_text)
+            below = _repair_top_level_action_args(action_text, below)
             return below if below.kind == "action" else None
     return None
 
@@ -499,6 +560,7 @@ class ReActAgent:
         # belongs to the layers.
         self._final_deferrals = 0
         self._refused_final: dict | None = None
+        self._fetch_attempted_ids: set[str] = set()
 
     # -- the run -------------------------------------------------------
 
@@ -515,6 +577,7 @@ class ReActAgent:
         self.last_context = ctx
         self._final_deferrals = 0
         self._refused_final = None
+        self._fetch_attempted_ids = set()
 
         self.trace.emit("agent_start", brief_id=str(brief.get("brief_id", "")))
 
@@ -544,9 +607,23 @@ class ReActAgent:
             ctx.messages.append({"role": "assistant", "content": text})
 
             if parsed.kind == "final":
-                report = parsed.final if isinstance(parsed.final, dict) else {}
-                ctx.stop_reason = "final"
-                break
+                unread = self._unread_claim_doc_id(parsed.final)
+                if unread is not None:
+                    # A search snippet is discovery evidence, not a document
+                    # read.  Real models sometimes cite it and stop despite
+                    # the protocol.  Fetch the model's own cited document once
+                    # so middleware can validate the claim against full text.
+                    self._refused_final = parsed.final
+                    parsed = ParsedOutput(
+                        kind="action",
+                        thought="Đọc toàn văn nguồn đã trích trước khi kết luận.",
+                        tool="fetch_doc",
+                        args={"doc_id": unread},
+                    )
+                else:
+                    report = parsed.final if isinstance(parsed.final, dict) else {}
+                    ctx.stop_reason = "final"
+                    break
 
             observation = self._observe(ctx, parsed)
             ctx.observations.append(observation)
@@ -570,6 +647,25 @@ class ReActAgent:
         # runner stamps its own `agent_end` with the timing it measured.
         self.trace.emit("agent_end", stop_reason=ctx.stop_reason, steps=ctx.step + 1)
         return report
+
+    def _unread_claim_doc_id(self, final) -> str | None:
+        """Return one model-cited claim source that has not been fetched."""
+        if not isinstance(final, dict):
+            return None
+        claims = final.get("claims")
+        if not isinstance(claims, list):
+            return None
+        for claim in claims:
+            if not isinstance(claim, dict):
+                continue
+            doc_id = claim.get("doc_id")
+            if (
+                isinstance(doc_id, str)
+                and doc_id
+                and doc_id not in self._fetch_attempted_ids
+            ):
+                return doc_id
+        return None
 
     # -- reading the model ---------------------------------------------
 
@@ -603,9 +699,10 @@ class ReActAgent:
         submitted if the run ends without a real FINAL, so a guard can
         only buy a turn, never lose a report.
         """
-        parsed = parse_output(_canonicalise(text))
+        canonical = _canonicalise(text)
+        parsed = parse_output(canonical)
         if parsed.kind != "final":
-            return parsed
+            return _repair_top_level_action_args(canonical, parsed)
 
         if _is_report_payload(parsed.final):
             action = _action_under_final(text)
@@ -667,8 +764,15 @@ class ReActAgent:
                 "THOUGHT/ACTION hoặc THOUGHT/FINAL."
             )
 
+        args = dict(parsed.args)
+        if parsed.tool == "fetch_doc":
+            doc_id = _as_text(args.get("doc_id"))
+            if doc_id:
+                # Record the attempt outside middleware so a budget refusal
+                # cannot make a premature FINAL loop until MAX_STEPS.
+                self._fetch_attempted_ids.add(doc_id)
         call = self.middleware.wrap_tool_call(ctx, self._dispatch)
-        result = call(parsed.tool, dict(parsed.args))
+        result = call(parsed.tool, args)
         if result is None or not hasattr(result, "ok"):
             return f"{TOOL_ERROR_PREFIX} layer trả về kết quả không hợp lệ cho {parsed.tool}"
         return result.content if result.ok else f"{TOOL_ERROR_PREFIX} {result.error}"
