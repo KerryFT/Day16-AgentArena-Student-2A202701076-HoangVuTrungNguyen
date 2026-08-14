@@ -11,6 +11,7 @@ from __future__ import annotations
 import argparse
 import os
 import sys
+from urllib.parse import urlparse
 
 try:
     from scripts import run_practice
@@ -21,6 +22,7 @@ except ImportError:  # Direct execution puts ``scripts`` on sys.path.
 REQUIRED_ENV = ("ARENA_API_KEY", "ARENA_BASE_URL", "ARENA_MODEL")
 DEFAULT_OUT = "runs/real-preview.json"
 DEFAULT_TRACE_DIR = "runs/traces-real-preview"
+PLACEHOLDER_FRAGMENTS = ("your-endpoint", "your-model", "example.com")
 
 
 def _has_option(args: list[str], option: str) -> bool:
@@ -54,6 +56,31 @@ def _real_args(extra: list[str]) -> list[str]:
     return args
 
 
+def _configuration_errors() -> list[str]:
+    values = {name: os.environ.get(name, "").strip() for name in REQUIRED_ENV}
+    errors = [f"{name} is missing" for name, value in values.items() if not value]
+    if errors:
+        return errors
+
+    api_key = values["ARENA_API_KEY"]
+    base_url = values["ARENA_BASE_URL"]
+    model = values["ARENA_MODEL"]
+    lowered = (api_key + " " + base_url + " " + model).lower()
+    if api_key in {"...", "sk-..."}:
+        errors.append("ARENA_API_KEY is still a placeholder")
+    if any(fragment in lowered for fragment in PLACEHOLDER_FRAGMENTS):
+        errors.append("ARENA_BASE_URL or ARENA_MODEL is still a placeholder")
+
+    parsed = urlparse(base_url)
+    if parsed.scheme not in {"http", "https"} or not parsed.hostname:
+        errors.append("ARENA_BASE_URL must be an absolute HTTP(S) URL")
+    if parsed.path.rstrip("/").endswith("chat/completions"):
+        errors.append(
+            "ARENA_BASE_URL must end at the API root (usually /v1), not /chat/completions"
+        )
+    return errors
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(add_help=False)
     parser.add_argument(
@@ -69,15 +96,15 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     if _effective_model(args) == "real":
-        missing = [name for name in REQUIRED_ENV if not os.environ.get(name, "").strip()]
-        if missing:
+        errors = _configuration_errors()
+        if errors:
             print(
-                "Missing real-model configuration: " + ", ".join(missing),
+                "Invalid real-model configuration:\n  - " + "\n  - ".join(errors),
                 file=sys.stderr,
             )
             print(
-                "Set an OpenAI-compatible endpoint, API key, and model name, "
-                "then run this command again.",
+                "For OpenAI directly, use ARENA_BASE_URL=https://api.openai.com/v1 "
+                "and a model available to your API project.",
                 file=sys.stderr,
             )
             return 2
