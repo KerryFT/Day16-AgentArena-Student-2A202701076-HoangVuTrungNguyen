@@ -73,22 +73,73 @@ from __future__ import annotations
 from harness.middleware import Middleware
 
 
+def _find_doc_for_text(ctx, text):
+    """Return the observed document containing *text* on a single line."""
+    if ctx.corpus is None:
+        return None
+    observed = ctx.observed_text
+    for doc in ctx.corpus.docs:
+        if doc.body not in observed:
+            continue
+        if any(text in line for line in doc.body.split("\n")):
+            return doc.doc_id
+    return None
+
+
 class Critic(Middleware):
     """Xoá những gì bằng chứng không đỡ; abstain khi không còn gì."""
 
     name = "critic"
 
     def after_agent(self, ctx, report):
-        # TODO (§2): khoảng 10-25 dòng.
-        #  1. Lấy report["claims"]; nếu rỗng hoặc không phải list thì thôi.
-        #  2. Với mỗi claim: nếu claim["text"] có trong ctx.observed_text
-        #     -> giữ nguyên (KHÔNG sửa chữ).
-        #  3. Nếu không: thử tách câu ghép (trường hợp (c) ở docstring).
-        #     Tách được -> giữ cả hai nửa, mỗi nửa gắn doc_id của tài liệu
-        #     thật sự chứa nó, và đặt report["abstain"] = True.
-        #  4. Không tách được -> đây là bịa: bỏ claim đi.
-        #  5. Nếu không còn claim nào: report["abstain"] = True,
-        #     claims = [], citations = [], và viết lại "answer" nói rõ là
-        #     không đủ căn cứ.
-        #  6. Cập nhật report["citations"] cho khớp với claims còn lại.
-        return report  # <- mặc định KHÔNG LÀM GÌ: agent vẫn chạy được
+        claims = report.get("claims")
+        if not isinstance(claims, list):
+            return report
+
+        kept = []
+        found_unsupported = False
+        for claim in claims:
+            if not isinstance(claim, dict):
+                continue
+            text = claim.get("text", "")
+            if not text:
+                continue
+            if ctx.saw(text):
+                kept.append(claim)
+                continue
+
+            split_done = False
+            for conjunction in [" và ", " nhưng ", " hoặc "]:
+                if conjunction not in text:
+                    continue
+                left, right = (part.strip() for part in text.split(conjunction, 1))
+                if not left or not right or not ctx.saw(left) or not ctx.saw(right):
+                    continue
+                left_doc = _find_doc_for_text(ctx, left)
+                right_doc = _find_doc_for_text(ctx, right)
+                if left_doc and right_doc and left_doc != right_doc:
+                    kept.extend((
+                        {"text": left, "doc_id": left_doc},
+                        {"text": right, "doc_id": right_doc},
+                    ))
+                    found_unsupported = True
+                    split_done = True
+                    break
+            if not split_done:
+                found_unsupported = True
+
+        report["claims"] = kept
+        if found_unsupported:
+            report["abstain"] = True
+        if not kept:
+            report["abstain"] = True
+            report["claims"] = []
+            report["citations"] = []
+            report["answer"] = "Không đủ căn cứ từ tài liệu để trả lời câu hỏi này."
+        else:
+            report["citations"] = sorted({
+                claim.get("doc_id", "")
+                for claim in kept
+                if isinstance(claim.get("doc_id"), str)
+            })
+        return report
