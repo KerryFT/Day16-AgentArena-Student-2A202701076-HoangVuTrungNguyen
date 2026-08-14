@@ -257,7 +257,19 @@ F. KHI CÂU HỎI YÊU CẦU CHỌN MỘT KẾT LUẬN.
    MỘT chuỗi duy nhất, chép nguyên văn đúng từng chữ phương án đã chọn từ câu hỏi,
    không diễn giải lại. Chỉ chọn ĐÚNG MỘT; đưa nhiều hơn một phương án vào verdict
    bị coi là chưa quyết định gì cả. Trường answer vẫn phải trả lời đầy đủ câu hỏi
-   như bình thường. Câu hỏi không liệt kê phương án nào thì bỏ hẳn khóa verdict."""
+   như bình thường. Câu hỏi không liệt kê phương án nào thì bỏ hẳn khóa verdict.
+
+G. TÁCH NHU CẦU TRA CỨU KHỎI BỐI CẢNH GÂY NHIỄU.
+   Trước mỗi lần search, xác định chính xác loại dữ kiện câu hỏi yêu cầu: quy định,
+   thời hạn, tỷ lệ, số liệu báo cáo hay kết luận. Các mã ticket, ví dụ tình huống,
+   đơn hàng và tài liệu phụ chỉ là bối cảnh, không mặc nhiên là chủ đề cần tìm.
+   Truy vấn phải ngắn, ưu tiên tên quy trình/chính sách và loại văn bản nội bộ.
+   Nếu cần số liệu, kết hợp chủ đề với các từ như báo cáo, thống kê và tên phòng ban
+   được câu hỏi nhắc tới. Nếu kết quả đầu tiên nghiêng sang một chủ đề phụ, không
+   fetch hàng loạt; hãy search lại bằng chủ đề chính. Search chỉ dùng để khám phá:
+   mọi claim cuối cùng phải đến từ toàn văn đã đọc bằng fetch_doc.
+   Trước khi FINAL, kiểm tra từng yêu cầu trong câu hỏi đã có ít nhất một claim chứa
+   đúng dữ kiện tương ứng; nếu thiếu thì tiếp tục tìm trong ngân sách còn lại."""
 
 
 def real_model_system_prompt(base: str = ARENA_SYSTEM_PROMPT) -> str:

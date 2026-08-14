@@ -311,6 +311,8 @@ def main(argv=None) -> int:
     parser.add_argument("--prompt-addendum", action="store_true",
                         help="thêm ràng buộc 'phải search trước khi abstain' vào system prompt")
     parser.add_argument("--out", default=str(DEFAULT_OUT), help="file điểm JSON")
+    parser.add_argument("--trace-dir", default=None,
+                        help="thư mục ghi một trace JSONL cho mỗi brief")
     parser.add_argument("--entry", default=None, help="tên đội / bài nộp")
     parser.add_argument("--tag", default="entry", choices=("entry", "baseline"),
                         help='"baseline" đánh dấu file này là mốc so sánh cho leaderboard')
@@ -361,6 +363,11 @@ def main(argv=None) -> int:
             brief, model=model, corpus=corpus, middleware=layers, seed=seed, config=config
         )
         results.append(result)
+        if args.trace_dir:
+            trace_dir = Path(args.trace_dir)
+            trace_dir.mkdir(parents=True, exist_ok=True)
+            trace_path = trace_dir / f"{result.brief_id}.jsonl"
+            trace_path.write_text(result.trace_jsonl + "\n", encoding="utf-8")
         score = score_result(result, brief, corpus)
         rows.append(
             {
