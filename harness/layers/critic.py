@@ -86,6 +86,25 @@ def _find_doc_for_text(ctx, text):
     return None
 
 
+def _split_observed_compound(ctx, text):
+    """Find a valid model-written split backed by two observed documents."""
+    for conjunction in (" và ", " nhưng ", " hoặc "):
+        start = 0
+        while True:
+            boundary = text.find(conjunction, start)
+            if boundary == -1:
+                break
+            left = text[:boundary].strip()
+            right = text[boundary + len(conjunction):].strip()
+            if left and right and ctx.saw(left) and ctx.saw(right):
+                left_doc = _find_doc_for_text(ctx, left)
+                right_doc = _find_doc_for_text(ctx, right)
+                if left_doc and right_doc and left_doc != right_doc:
+                    return left, left_doc, right, right_doc
+            start = boundary + len(conjunction)
+    return None
+
+
 class Critic(Middleware):
     """Xoá những gì bằng chứng không đỡ; abstain khi không còn gì."""
 
@@ -108,25 +127,16 @@ class Critic(Middleware):
                 kept.append(claim)
                 continue
 
-            split_done = False
-            for conjunction in [" và ", " nhưng ", " hoặc "]:
-                if conjunction not in text:
-                    continue
-                left, right = (part.strip() for part in text.split(conjunction, 1))
-                if not left or not right or not ctx.saw(left) or not ctx.saw(right):
-                    continue
-                left_doc = _find_doc_for_text(ctx, left)
-                right_doc = _find_doc_for_text(ctx, right)
-                if left_doc and right_doc and left_doc != right_doc:
-                    kept.extend((
-                        {"text": left, "doc_id": left_doc},
-                        {"text": right, "doc_id": right_doc},
-                    ))
-                    found_unsupported = True
-                    split_done = True
-                    break
-            if not split_done:
+            split = _split_observed_compound(ctx, text)
+            if split is None:
                 found_unsupported = True
+                continue
+            left, left_doc, right, right_doc = split
+            kept.extend((
+                {"text": left, "doc_id": left_doc},
+                {"text": right, "doc_id": right_doc},
+            ))
+            found_unsupported = True
 
         report["claims"] = kept
         if found_unsupported:
